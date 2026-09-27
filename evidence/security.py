@@ -21,7 +21,7 @@ def validate_extension(filename: str) -> bool:
 def validate_bytes(data: bytes) -> tuple[bool, str]:
     if not data:
         return False, "empty file"
-    if data.startswith(b"MZ") or data.startswith(b"PK\\x03\\x04"):
+    if data.startswith(b"MZ") or data.startswith(b"PK" + bytes([3, 4])):
         return False, "potentially unsafe executable/archive content"
     return True, ""
 
