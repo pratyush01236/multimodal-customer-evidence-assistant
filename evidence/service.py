@@ -1,6 +1,8 @@
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
+
 from config import BACKGROUND_TIMEOUT_SECONDS, UPLOAD_DIR, MAX_FILE_MB, LOG_FILE
 from .compare import compare_message_with_evidence
 from .extract import enrich
@@ -13,13 +15,10 @@ from .security import sanitize_for_log, validate_bytes, validate_extension
 Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
 Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO)
+_fast_pool = ThreadPoolExecutor(max_workers=4)
 
 def _analyse(message, paths):
-    started = time.monotonic()
-    evidence = []
-    for path in paths:
-        ev = enrich(inspect_file(path, Path(path).name))
-        evidence.append(ev)
+    evidence = [enrich(inspect_file(path, Path(path).name)) for path in paths]
     conflicts, clarification = compare_message_with_evidence(message, evidence)
     unsafe = [e for e in evidence if not e.safe]
     if unsafe:
@@ -43,12 +42,16 @@ def process_uploads(message: str, uploads: list[tuple[str, bytes]]):
         target.write_bytes(data)
         paths.append(str(target))
 
-    started = time.monotonic()
-    result = _analyse(message, paths)
-    elapsed = time.monotonic() - started
-    logging.info("analysis status=%s elapsed=%.2f message=%s", result.status, elapsed, sanitize_for_log(message))
-
-    if elapsed > BACKGROUND_TIMEOUT_SECONDS:
-        job_id = submit(_analyse, message, paths)
-        return AnalysisResult("queued", "Processing is taking longer than expected. Your request has been moved to the background queue.", background_job_id=job_id)
-    return result
+    future = _fast_pool.submit(_analyse, message, paths)
+    try:
+        result = future.result(timeout=BACKGROUND_TIMEOUT_SECONDS)
+        logging.info("analysis status=%s message=%s", result.status, sanitize_for_log(message))
+        return result
+    except TimeoutError:
+        job_id = submit(lambda: future.result())
+        logging.info("analysis status=queued job=%s message=%s", job_id, sanitize_for_log(message))
+        return AnalysisResult(
+            "queued",
+            "Processing is taking longer than expected. Your request has been moved to the background queue.",
+            background_job_id=job_id,
+        )
